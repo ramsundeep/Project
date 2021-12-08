@@ -1,159 +1,220 @@
-from __future__ import print_function
-from __future__ import division
-import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset, Dataset
+from torchvision import datasets, transforms, models # add models to the list
+from torchvision.utils import make_grid
+from sklearn.model_selection import train_test_split
+from PIL import Image
+
 import numpy as np
+import matplotlib.pyplot as plt
+get_ipython().run_line_magic('matplotlib', 'inline')
+
+
+import warnings
+warnings.filterwarnings("ignore")
+
+
+
+images = np.load("Train_Images.npy")
+labels = np.load("Train_Labels.npy").T
+
+
+
+labels.shape
+
+
+
+images = images.reshape(23502,1,150,150)
+images.shape
+
+
+
+X_train, X_test, y_train, y_test = train_test_split(images, labels, test_size=0.33, random_state=42)
+
+
+
+X_train = X_train/255
+X_test = X_test/255
+
+
+
+X_trainTensor = torch.Tensor(X_train)
+X_testTensor = torch.Tensor(X_test)
+y_trainTensor = torch.Tensor(y_train)
+y_testTensor = torch.Tensor(y_test)
+
+
+
+X_trainTensor[0]
+
+
+
+y_trainTensor = y_trainTensor.type(torch.LongTensor)
+y_testTensor = y_testTensor.type(torch.LongTensor)
+
+
+
+train_data = TensorDataset(X_trainTensor,y_trainTensor) # create your datset
+train_loader = DataLoader(train_data,batch_size=10,shuffle=True) # create your dataloader
+
+
+test_data = TensorDataset(X_testTensor,y_testTensor) # create your datset
+test_loader = DataLoader(test_data,batch_size=10,shuffle=True) # create your dataloader
+
+
+
+len(train_data)
+
+
+
+len(test_data)
+
+
+
+print(f'Training images available: {len(train_data)}')
+print(f'Testing images available:  {len(test_data)}')
+
+
+
+class ConvolutionalNetwork(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1,10, 3, 1)
+        self.conv2 = nn.Conv2d(10, 20, 3, 1)
+        self.conv3 = nn.Conv2d(20,40, 3, 1)
+        self.fc1 = nn.Linear(17*17*40, 100)
+        self.fc2 = nn.Linear(100, 60)
+        self.fc3 = nn.Linear(60,25)
+
+    def forward(self, X):
+        X = F.relu(self.conv1(X))
+        X = F.max_pool2d(X, 2, 2)
+        X = F.relu(self.conv2(X))
+        X = F.max_pool2d(X, 2, 2)
+        X = F.relu(self.conv3(X))
+        X = F.max_pool2d(X, 2, 2)
+        X = X.view(-1, 17*17*40)
+        X = F.relu(self.fc1(X))
+        X = F.relu(self.fc2(X))
+        X = self.fc3(X)
+        return F.log_softmax(X, dim=1)
+
+
+
+(((150-2)/2)-2)/2
+
+
+
+torch.manual_seed(101)
+CNNmodel = ConvolutionalNetwork()
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(CNNmodel.parameters(), lr=0.001)
+CNNmodel
+
+
+
+def count_parameters(model):
+    params = [p.numel() for p in model.parameters() if p.requires_grad]
+    for item in params:
+        print(f'{item:>8}')
+    print(f'________\n{sum(params):>8}')
+
+
+
+count_parameters(CNNmodel)
+
+
+
 import time
-import copy
-from Function.Network import model
-from Function.Get_Result import Classifier_results
-from data_prepare import dataloaders_dict
+start_time = time.time()
 
+epochs = 3
 
-def train(model, dataloaders, optimizer, device='cpu', num_epochs=25):
-    since = time.time()
+max_trn_batch = 3000
+max_tst_batch = 3000
 
-    train_error_history = []
-    val_error_history = []
-    train_acc_history = []
-    val_acc_history = []
+train_losses = []
+test_losses = []
+train_correct = []
+test_correct = []
 
-    CE_loss = nn.CrossEntropyLoss()
+for i in range(epochs):
+    trn_corr = 0
+    tst_corr = 0
+    
+    # Run the training batches
+    for b, (X_train, y_train) in enumerate(train_loader):
+        
+        # Limit the number of batches
+        if b == max_trn_batch:
+            break
+        b+=1
+        
+        # Apply the model
+        y_pred = CNNmodel(X_train)
+        loss = criterion(y_pred, y_train)
+ 
+        # Tally the number of correct predictions
+        predicted = torch.max(y_pred.data, 1)[1] 
+        batch_corr = (predicted == y_train).sum()
+        trn_corr += batch_corr
+        
+        # Update parameters
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-    best_model_wts = copy.deepcopy(model.state_dict())
-    best_loss = np.inf
+        # Print interim results
+        if b%100 == 0:
+            print(f'epoch: {i:2}  batch: {b:4} [{10*b:6}/8000]  loss: {loss.item():10.8f} accuracy: {trn_corr.item()*100/(10*b):7.3f}%')
 
-    model = model.to(device)
+    train_losses.append(loss)
+    train_correct.append(trn_corr)
 
-    for epoch in range(num_epochs):
-        print('Epoch {}/{}'.format(epoch + 1, num_epochs))
-        print('-' * 10)
-
-        # Each epoch has a training and validation phase
-        for phase in ['train', 'val']:
-
-            acc = 0
-            n = 0
-            if phase == 'train':
-                model.train()  # Set model to training mode
-            else:
-                model.eval()  # Set model to evaluate mode
-
-            running_loss = 0.0
-            # Iterate over data.
-            for idx, (inputs, labels) in enumerate(dataloaders[phase]):
-                inputs = torch.unsqueeze(inputs, dim=1)
-                inputs = inputs.to(device)
-                # input_numpy = inputs.cpu().detach().numpy()
-                labels = torch.squeeze(labels)
-                labels = labels.to(device)
-                n += len(labels)
-
-                # zero the parameter gradients
-                optimizer.zero_grad()
-
-                with torch.set_grad_enabled(phase == 'train'):
-
-                    # forward pass
-                    outputs = model(inputs)
-                    loss = CE_loss(outputs, labels)
-
-                    # backward pass
-                    if phase == 'train':
-                        loss.backward()
-                        optimizer.step()
-
-                    # statistics
-                    running_loss += loss.item() * inputs.size(0)
-                    index = torch.argmax(outputs, dim=1)
-                    acc += (torch.argmax(outputs, dim=1) == labels).sum().item()
-
-            epoch_loss = running_loss / len(dataloaders[phase].sampler)
-
-            if phase == 'train':
-                train_error_history.append(epoch_loss)
-                train_acc_history.append(acc / n)
-
-            # print()
-            print('{} Loss: {:.6f}, acc:{:.6f}'.format(phase, epoch_loss, acc / n))
-
-            # deep copy the model
-            if phase == 'val' and epoch_loss < best_loss:
-                best_epoch = epoch + 1
-                best_loss = epoch_loss
-                best_model_wts = copy.deepcopy(model.state_dict())
-
-            if phase == 'val':
-                val_error_history.append(epoch_loss)
-                val_acc_history.append(acc / n)
-    print()
-
-    time_elapsed = time.time() - since
-    print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
-    print('Best validation loss: {:4f} at Epoch {:.0f}'.format(best_loss, best_epoch))
-
-    # load best model weights
-    # Fit model on hold out test set
-    model.load_state_dict(best_model_wts)
-
-    # Get predictions for val or test set
-    GT = {}
-    predictions = {}
-    for phase2 in ['val', 'test']:
-        GT[phase2], predictions[phase2] = predict(dataloaders[phase2], model, device, phase2)
-
-    return (
-        model, best_model_wts, train_error_history, val_error_history, train_acc_history, val_acc_history, best_loss,
-        time_elapsed, GT, predictions)
-
-
-def predict(dataloader, model, device, phase):
-    # Initialize and accumalate ground truth and predictions
-    GT = np.array(0)
-    Predictions = np.array(0)
-    running_corrects = 0
-    model = model.to(device)
-    model = nn.Sequential(model, nn.Softmax(dim=1))
-    model.eval()
-    # Iterate over data.
+    # Run the testing batches
     with torch.no_grad():
-        for idx, (inputs, labels) in enumerate(dataloader):
-            inputs = inputs.to(device)
-            inputs = torch.unsqueeze(inputs, dim=1)
-            labels = labels.to(device)
+        for b, (X_test, y_test) in enumerate(test_loader):
+            # Limit the number of batches
+            if b == max_tst_batch:
+                break
 
-            # forward
-            outputs = model(inputs)
-            _, preds = torch.max(outputs, 1)
+            # Apply the model
+            y_val = CNNmodel(X_test)
 
-            GT = np.concatenate((GT, labels.detach().cpu().numpy()), axis=None)
+            # Tally the number of correct predictions
+            predicted = torch.max(y_val.data, 1)[1] 
+            tst_corr += (predicted == y_test).sum()
 
-            Predictions = np.concatenate((Predictions, preds.detach().cpu().numpy()), axis=None)
-            running_corrects += torch.sum(preds == labels.data)
+    loss = criterion(y_val, y_test)
+    test_losses.append(loss)
+    test_correct.append(tst_corr)
 
-    test_acc = running_corrects.double() / len(dataloader.sampler)
-    print(phase + ' Accuracy: {:4f}'.format(test_acc))
-
-    return GT[1:], Predictions[1:]
+print(f'\nDuration: {time.time() - start_time:.0f} seconds') # print the time elapsed
 
 
-if __name__ == '__main__':
-    lr = 0.1
-    epoch = 50
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    channel = [8, 16, 32, 64, 128, 256, 512]
-    model = model(channel)
-    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-    (model, best_model_wts, train_error_history, val_error_history, train_acc_history, val_acc_history, best_loss,
-     time_elapsed, GT, prediction) = train(model, dataloaders_dict, optimizer, device, epoch)
 
-    folder = 'Results'
-    current_directory = os.getcwd()
-    final_directory = os.path.join(current_directory, folder)
-    # save_results(final_directory, model, best_model_wts, train_error_history, val_error_history, time_elapsed,
-    #              best_loss)
+plt.plot([t/157.46 for t in train_correct], label='training accuracy')
+plt.plot([t/77.56 for t in test_correct], label='validation accuracy')
+plt.title('Accuracy at the end of each epoch')
+plt.legend();
 
-    Classifier_results(final_directory, model, best_model_wts, train_error_history, val_error_history,
-                       train_acc_history,
-                       val_acc_history, GT, prediction)
+
+Training images available: 15322
+Testing images available:  8180
+
+
+
+for i in train_correct:
+    print(i/15322)
+
+
+
+for i in test_correct:
+    print(i/8180)
+
+
+
+file="model.pth"
+torch.save(CNNmodel.state_dict(),file)
